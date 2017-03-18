@@ -1,5 +1,5 @@
 [![Build Status](https://travis-ci.org/okutane/entity-locker.svg?branch=master)](https://travis-ci.org/okutane/entity-locker)
-[![Build Status](https://travis-ci.org/okutane/entity-locker.svg?branch=master)](https://travis-ci.org/okutane/entity-locker)
+[![codecov](https://codecov.io/gh/okutane/sanity/branch/master/graph/badge.svg)](https://codecov.io/gh/okutane/sanity)
 
 EntityLocker
 ------------
