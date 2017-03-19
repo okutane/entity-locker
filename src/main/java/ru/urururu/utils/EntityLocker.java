@@ -13,6 +13,8 @@ public abstract class EntityLocker<K> {
     }
 
     public LockContext with(K key) {
+        // todo consider removing this part of interface.
+
         Lock lock = get(key);
         lock.lock();
 
@@ -22,6 +24,12 @@ public abstract class EntityLocker<K> {
                 lock.unlock();
             }
         };
+    }
+
+    public void doWith(K key, Runnable runnable) {
+        try (LockContext ignored = with(key)) {
+            runnable.run();
+        }
     }
 
     public abstract Lock get(K key);
@@ -38,7 +46,11 @@ public abstract class EntityLocker<K> {
             lockFactory = new Function<K, Lock>() {
                 @Override
                 public Lock apply(K k) {
-                    return locks[k == null ? 0 : k.hashCode() % numLocks];
+                    int index = k == null ? 0 : k.hashCode() % numLocks;
+                    if (index < 0) {
+                        index += numLocks;
+                    }
+                    return locks[index];
                 }
             };
 

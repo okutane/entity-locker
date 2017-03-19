@@ -1,7 +1,9 @@
 package ru.urururu.utils;
 
+import org.hamcrest.core.IsEqual;
 import org.hamcrest.core.IsInstanceOf;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestRule;
@@ -40,8 +42,8 @@ public class EntityLockerTest {
         Entity<String, Integer> alice = new Entity<>("alice", 500);
         Entity<String, Integer> bob = new Entity<>("bob", 500);
 
-        try (LockContext aliceCtx = locker.with(alice.key)) {
-            try (LockContext bobCtx = locker.with(bob.key)) {
+        try (LockContext ignored = locker.with(alice.key)) {
+            try (LockContext ignored2 = locker.with(bob.key)) {
                 alice.value += 100;
                 bob.value -= 100;
             }
@@ -85,7 +87,7 @@ public class EntityLockerTest {
         successfulThreads.addThread(new Runnable() {
             @Override
             public void run() {
-                try (LockContext ctx = locker.with(alice.key)) {
+                try (LockContext ignored = locker.with(alice.key)) {
                     await(barrier); // 1. thread A got Alice.
                     await(barrier, TimeoutException.class); // 2. timeout before thread B get Alice.
                 }
@@ -98,6 +100,92 @@ public class EntityLockerTest {
                 try (LockContext ctx = locker.with(alice.key)) {
                     await(barrier, BrokenBarrierException.class); // 3. got here after timeout in thread A.
                 }
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+    }
+
+    @Test
+    public void testReenterable() {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+
+        locker.doWith(alice.key, new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        alice.value += 100;
+                    }
+                });
+            }
+        });
+
+        assertThat(alice.value, new IsEqual<>(600));
+    }
+
+    @Ignore
+    @Test
+    public void testDeadlock() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+        Entity<String, Integer> carlos = new Entity<>("carlos", 0);
+
+        CyclicBarrier barrier = new CyclicBarrier(3);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // all threads are locked on different keys
+                        locker.doWith(bob.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                fail("unreachable");
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // all threads are locked on different keys
+                        locker.doWith(carlos.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                fail("unreachable");
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(carlos.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // all threads are locked on different keys
+                        locker.doWith(alice.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                fail("unreachable");
+                            }
+                        });
+                    }
+                });
             }
         });
 
