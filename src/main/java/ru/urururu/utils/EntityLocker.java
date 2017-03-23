@@ -1,69 +1,124 @@
 package ru.urururu.utils;
 
-import java.util.concurrent.locks.Lock;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 /**
  * @author <a href="mailto:dmitriy.g.matveev@gmail.com">Dmitry Matveev</a>
  */
-public abstract class EntityLocker<K> {
-    public static <K> EntityLocker.Builder<K> forKeysOf(Class<K> keyClass) {
-        return new Builder<>();
-    }
-
-    public LockContext with(K key) {
-        // todo consider removing this part of interface.
-
-        Lock lock = get(key);
-        lock.lock();
-
-        return new LockContext() {
-            @Override
-            public void close() {
-                lock.unlock();
-            }
-        };
-    }
+public class EntityLocker<K> {
+    private final Map<K, LockInfo> locks = new HashMap<>();
+    private Map<Thread, List<LockInfo>> threads = new ConcurrentHashMap<>();
 
     public void doWith(K key, Runnable runnable) {
-        try (LockContext ignored = with(key)) {
-            runnable.run();
+        LockInfo info = get(key);
+        try {
+            info.lock.lock();
+            try {
+                runnable.run();
+            } finally {
+                info.lock.unlock();
+            }
+        } finally {
+            release(info);
         }
     }
 
-    public abstract Lock get(K key);
-
-    public static class Builder<K> {
-        Function<K, Lock> lockFactory;
-
-        public Builder<K> withBucketOfLocks(int numLocks) {
-            Lock[] locks = new Lock[numLocks];
-            for (int i = 0; i < numLocks; i++) {
-                locks[i] = new ReentrantLock();
-            }
-
-            lockFactory = new Function<K, Lock>() {
-                @Override
-                public Lock apply(K k) {
-                    int index = k == null ? 0 : k.hashCode() % numLocks;
-                    if (index < 0) {
-                        index += numLocks;
-                    }
-                    return locks[index];
-                }
-            };
-
-            return this;
+    private void checkForPossibleDeadlocks(LockInfo wanted) {
+        if (wanted.lock.isHeldByCurrentThread()) {
+            // ok, we already own it.
+            return;
         }
 
-        public EntityLocker build() {
-            return new EntityLocker<K>() {
+        List<LockInfo> heldByCurrent = new ArrayList<>(threads.getOrDefault(Thread.currentThread(), Collections.emptyList()));
+
+        for (int i = 0; i < heldByCurrent.size(); i++) {
+            LockInfo held = heldByCurrent.get(i);
+
+            if (held == wanted) {
+                throw new DeadlockException();
+            }
+
+            for (Thread heldThread : held.lock.getQueuedThreads()) {
+                heldByCurrent.addAll(threads.getOrDefault(heldThread, Collections.emptyList()));
+            }
+        }
+    }
+
+    private LockInfo get(K key) {
+        synchronized (locks) {
+            LockInfo result = locks.computeIfAbsent(key, new Function<K, LockInfo>() {
                 @Override
-                public Lock get(K key) {
-                    return lockFactory.apply(key);
+                public LockInfo apply(K k) {
+                    LockInfo info = new LockInfo(k);
+
+                    info.lock = new ReentrantLockAdapter() {
+                        @Override
+                        public void lock() {
+                            super.lock();
+                            if (getHoldCount() == 1) {
+                                // we've just acquired our first hold of this lock
+                                List<LockInfo> threadLocks = threads.computeIfAbsent(Thread.currentThread(), k -> new ArrayList<>());
+                                threadLocks.add(info);
+                            }
+                        }
+
+                        @Override
+                        public void unlock() {
+                            if (getHoldCount() == 1) {
+                                // we're about to release our last hold of this lock
+                                List<LockInfo> threadLocks = threads.get(Thread.currentThread());
+                                threadLocks.remove(info);
+                                if (threadLocks.isEmpty()) {
+                                    threads.remove(Thread.currentThread());
+                                }
+                            }
+                            super.unlock();
+                        }
+                    };
+
+                    return info;
                 }
-            };
+            });
+
+            checkForPossibleDeadlocks(result);
+
+            result.refCount++;
+
+            return result;
+        }
+    }
+
+    private void release(LockInfo info) {
+        synchronized (locks) {
+            if (--info.refCount == 0) {
+                // releasing last reference
+                locks.remove(info.key);
+            }
+        }
+    }
+
+    @Deprecated
+    boolean isStateClean() {
+        return locks.isEmpty() && threads.isEmpty();
+    }
+
+    private class LockInfo {
+        private final K key;
+        private ReentrantLockAdapter lock;
+        private int refCount = 0;
+
+        LockInfo(K key) {
+            this.key = key;
+        }
+    }
+
+    private static class ReentrantLockAdapter extends ReentrantLock {
+        @Override
+        public Collection<Thread> getQueuedThreads() {
+            return super.getQueuedThreads();
         }
     }
 }

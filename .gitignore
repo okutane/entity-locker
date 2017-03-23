@@ -12,3 +12,6 @@ buildNumber.properties
 # The most intellijent IDE
 .idea
 *.iml
+
+# OS-specific
+.DS_Store

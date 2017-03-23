@@ -2,10 +2,9 @@ package ru.urururu.utils;
 
 import org.hamcrest.core.IsEqual;
 import org.hamcrest.core.IsInstanceOf;
-import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.RuleChain;
 import org.junit.rules.TestRule;
 import org.junit.rules.Timeout;
 import org.junit.runner.Description;
@@ -24,30 +23,33 @@ import static org.junit.Assert.fail;
  * @author <a href="mailto:dmitriy.g.matveev@gmail.com">Dmitry Matveev</a>
  */
 public class EntityLockerTest {
-    @Rule
-    public SuccessfulThreads successfulThreads = new SuccessfulThreads();
+    private LockerState lockerState = new LockerState();
+    private SuccessfulThreads successfulThreads = new SuccessfulThreads();
 
     @Rule
-    public Timeout timeout = new Timeout(500, TimeUnit.MILLISECONDS);
+    public RuleChain chain = RuleChain.outerRule(lockerState)
+            .around(successfulThreads)
+            .around(new Timeout(500, TimeUnit.MILLISECONDS));
 
     private EntityLocker<String> locker;
-
-    @Before
-    public void setUp() {
-        locker = EntityLocker.<String>forKeysOf(String.class).withBucketOfLocks(16).build();
-    }
 
     @Test
     public void testSingleThreadMultipleLocks() {
         Entity<String, Integer> alice = new Entity<>("alice", 500);
         Entity<String, Integer> bob = new Entity<>("bob", 500);
 
-        try (LockContext ignored = locker.with(alice.key)) {
-            try (LockContext ignored2 = locker.with(bob.key)) {
-                alice.value += 100;
-                bob.value -= 100;
+        locker.doWith(alice.key, new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        alice.value += 100;
+                        bob.value -= 100;
+                    }
+                });
             }
-        }
+        });
     }
 
     @Test
@@ -60,22 +62,57 @@ public class EntityLockerTest {
         successfulThreads.addThread(new Runnable() {
             @Override
             public void run() {
-                try (LockContext ctx = locker.with(alice.key)) {
-                    await(barrier); // ensure both threads hold some lock at the same time
-                }
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // ensure both threads hold some lock at the same time
+                    }
+                });
             }
         });
         successfulThreads.addThread(new Runnable() {
             @Override
             public void run() {
-                try (LockContext ctx = locker.with(bob.key)) {
-                    await(barrier); // ensure both threads hold some lock at the same time
-                }
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // ensure both threads hold some lock at the same time
+                    }
+                });
             }
         });
 
         successfulThreads.startAll();
         successfulThreads.joinAll();
+    }
+
+    @Test
+    public void testSequentialForSame() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, () -> {
+                    await(barrier); // 1. thread A got Alice.
+                    alice.value += 10;
+                });
+            }
+        });
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                await(barrier); // 1. thread A got Alice.
+                locker.doWith(alice.key, () -> alice.value += 20);
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+
+        assertThat(alice.value, new IsEqual<>(530));
     }
 
     @Test
@@ -87,19 +124,25 @@ public class EntityLockerTest {
         successfulThreads.addThread(new Runnable() {
             @Override
             public void run() {
-                try (LockContext ignored = locker.with(alice.key)) {
-                    await(barrier); // 1. thread A got Alice.
-                    await(barrier, TimeoutException.class); // 2. timeout before thread B get Alice.
-                }
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. thread A got Alice.
+                        await(barrier, TimeoutException.class); // 2. timeout before thread B get Alice.
+                    }
+                });
             }
         });
         successfulThreads.addThread(new Runnable() {
             @Override
             public void run() {
                 await(barrier); // 1. thread A got Alice.
-                try (LockContext ctx = locker.with(alice.key)) {
-                    await(barrier, BrokenBarrierException.class); // 3. got here after timeout in thread A.
-                }
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier, BrokenBarrierException.class); // 3. got here after timeout in thread A.
+                    }
+                });
             }
         });
 
@@ -126,7 +169,6 @@ public class EntityLockerTest {
         assertThat(alice.value, new IsEqual<>(600));
     }
 
-    @Ignore
     @Test
     public void testDeadlock() throws InterruptedException {
         Entity<String, Integer> alice = new Entity<>("alice", 500);
@@ -135,17 +177,19 @@ public class EntityLockerTest {
 
         CyclicBarrier barrier = new CyclicBarrier(3);
 
+        successfulThreads.addExpectedException(DeadlockException.class);
+
         successfulThreads.addThread(new Runnable() {
             @Override
             public void run() {
                 locker.doWith(alice.key, new Runnable() {
                     @Override
                     public void run() {
-                        await(barrier); // all threads are locked on different keys
+                        await(barrier); // 1. all threads are locked on different keys
                         locker.doWith(bob.key, new Runnable() {
                             @Override
                             public void run() {
-                                fail("unreachable");
+                                bob.value += 10;
                             }
                         });
                     }
@@ -159,11 +203,11 @@ public class EntityLockerTest {
                 locker.doWith(bob.key, new Runnable() {
                     @Override
                     public void run() {
-                        await(barrier); // all threads are locked on different keys
+                        await(barrier); // 1. all threads are locked on different keys
                         locker.doWith(carlos.key, new Runnable() {
                             @Override
                             public void run() {
-                                fail("unreachable");
+                                carlos.value += 10;
                             }
                         });
                     }
@@ -177,11 +221,11 @@ public class EntityLockerTest {
                 locker.doWith(carlos.key, new Runnable() {
                     @Override
                     public void run() {
-                        await(barrier); // all threads are locked on different keys
+                        await(barrier); // 1. all threads are locked on different keys
                         locker.doWith(alice.key, new Runnable() {
                             @Override
                             public void run() {
-                                fail("unreachable");
+                                alice.value += 10;
                             }
                         });
                     }
@@ -191,6 +235,8 @@ public class EntityLockerTest {
 
         successfulThreads.startAll();
         successfulThreads.joinAll();
+
+        assertThat(alice.value + bob.value + carlos.value, new IsEqual<>(1020));
     }
 
     private void await(CyclicBarrier barrier) {
@@ -222,12 +268,13 @@ public class EntityLockerTest {
 
     private static class SuccessfulThreads implements TestRule {
         List<Thread> threads = new ArrayList<>();
-        List<Throwable> unhandledExceptions = Collections.synchronizedList(new ArrayList<>());
+        List<Class<? extends Throwable>> expectedExceptions = new ArrayList<>();
+        List<Class> unhandledExceptions = Collections.synchronizedList(new ArrayList<>());
 
         void addThread(Runnable r) {
             Thread thread = new Thread(r);
 
-            thread.setUncaughtExceptionHandler((t, e) -> unhandledExceptions.add(e));
+            thread.setUncaughtExceptionHandler((t, e) -> unhandledExceptions.add(e.getClass()));
 
             threads.add(thread);
         }
@@ -247,13 +294,34 @@ public class EntityLockerTest {
             return new Statement() {
                 @Override
                 public void evaluate() throws Throwable {
+                    expectedExceptions.clear();
                     unhandledExceptions.clear();
                     try {
                         statement.evaluate();
                     } finally {
                         threads.forEach(t -> assertEquals(Thread.State.TERMINATED, t.getState()));
-                        unhandledExceptions.forEach(Throwable::printStackTrace);
-                        assertEquals(Collections.emptyList(), unhandledExceptions);
+                        assertEquals(expectedExceptions, unhandledExceptions);
+                    }
+                }
+            };
+        }
+
+        public void addExpectedException(Class<? extends Throwable> exceptionClass) {
+            expectedExceptions.add(exceptionClass);
+        }
+    }
+
+    private class LockerState implements TestRule {
+        @Override
+        public Statement apply(Statement statement, Description description) {
+            return new Statement() {
+                @Override
+                public void evaluate() throws Throwable {
+                    locker = new EntityLocker<>();
+                    try {
+                        statement.evaluate();
+                    } finally {
+                        assertThat(locker.isStateClean(), new IsEqual<>(true));
                     }
                 }
             };
