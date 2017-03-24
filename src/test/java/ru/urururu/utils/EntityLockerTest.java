@@ -239,6 +239,159 @@ public class EntityLockerTest {
         assertThat(alice.value + bob.value + carlos.value, new IsEqual<>(1020));
     }
 
+    @Test
+    public void testNoParallelForDifferentAndGlobal1() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWithGlobal(new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. thread A got global lock.
+                        await(barrier, TimeoutException.class); // 2. timeout before thread B get Bob.
+                    }
+                });
+            }
+        });
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                await(barrier); // 1. thread A got global lock.
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier, BrokenBarrierException.class); // 3. got here after timeout in thread A.
+                    }
+                });
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+    }
+
+    @Test
+    public void testNoParallelForDifferentAndGlobal2() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. thread A got Alice.
+                        await(barrier, TimeoutException.class); // 2. timeout before thread B get global lock.
+                    }
+                });
+            }
+        });
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                await(barrier); // 1. thread A got Alice.
+                locker.doWithGlobal(new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier, BrokenBarrierException.class); // 3. got here after timeout in thread A.
+                    }
+                });
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+    }
+
+    @Test
+    public void testSequentialForDifferentAndGlobal1() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWithGlobal(() -> {
+                    await(barrier); // 1. thread A got global lock.
+                    alice.value += 10;
+                });
+            }
+        });
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                await(barrier); // 1. thread A got global lock.
+                locker.doWith(bob.key, () -> bob.value += 20); // this have to wait
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+
+        assertThat(alice.value, new IsEqual<>(510));
+        assertThat(bob.value, new IsEqual<>(520));
+    }
+
+    @Test
+    public void testSequentialForDifferentAndGlobal2() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, () -> {
+                    await(barrier); // 1. thread A got Alice.
+                    alice.value += 10;
+                });
+            }
+        });
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                await(barrier); // 1. thread A got Alice.
+                locker.doWithGlobal(() -> bob.value += 20); // this have to wait, because we want global lock.
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+
+        assertThat(alice.value, new IsEqual<>(510));
+        assertThat(bob.value, new IsEqual<>(520));
+    }
+
+    @Test
+    public void testReenterableGlobalAsLocal() {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+
+        locker.doWithGlobal(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        alice.value += 100;
+                    }
+                });
+            }
+        });
+
+        assertThat(alice.value, new IsEqual<>(600));
+    }
+
     private void await(CyclicBarrier barrier) {
         try {
             barrier.await(100, TimeUnit.MILLISECONDS);

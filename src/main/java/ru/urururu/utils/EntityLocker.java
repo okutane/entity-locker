@@ -2,27 +2,43 @@ package ru.urururu.utils;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
 
 /**
  * @author <a href="mailto:dmitriy.g.matveev@gmail.com">Dmitry Matveev</a>
  */
 public class EntityLocker<K> {
+    private final ReentrantReadWriteLock globalLock = new ReentrantReadWriteLock();
     private final Map<K, LockInfo> locks = new HashMap<>();
     private Map<Thread, List<LockInfo>> threads = new ConcurrentHashMap<>();
 
     public void doWith(K key, Runnable runnable) {
-        LockInfo info = get(key);
+        globalLock.readLock().lock();
         try {
-            info.lock.lock();
+            LockInfo info = get(key);
             try {
-                runnable.run();
+                doWithLock(runnable, info.lock);
             } finally {
-                info.lock.unlock();
+                release(info);
             }
         } finally {
-            release(info);
+            globalLock.readLock().unlock();
+        }
+    }
+
+    public void doWithGlobal(Runnable runnable) {
+        doWithLock(runnable, globalLock.writeLock());
+    }
+
+    private void doWithLock(Runnable runnable, Lock lock) {
+        lock.lock();
+        try {
+            runnable.run();
+        } finally {
+            lock.unlock();
         }
     }
 
