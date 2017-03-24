@@ -23,13 +23,18 @@ import static org.junit.Assert.fail;
  * @author <a href="mailto:dmitriy.g.matveev@gmail.com">Dmitry Matveev</a>
  */
 public class EntityLockerTest {
+    private static final int SHORT_TIMEOUT = 30;
+    private static final int LONG_TIMEOUT = 60;
+    private static final int BARRIER_TIMEOUT = 100;
+    private static final int TEST_TIMEOUT = 500;
+
     private LockerState lockerState = new LockerState();
     private SuccessfulThreads successfulThreads = new SuccessfulThreads();
 
     @Rule
     public RuleChain chain = RuleChain.outerRule(lockerState)
             .around(successfulThreads)
-            .around(new Timeout(500, TimeUnit.MILLISECONDS));
+            .around(new Timeout(TEST_TIMEOUT, TimeUnit.MILLISECONDS));
 
     private EntityLocker<String> locker;
 
@@ -392,9 +397,183 @@ public class EntityLockerTest {
         assertThat(alice.value, new IsEqual<>(600));
     }
 
+    @Test
+    public void testTryDeadlock() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+        Entity<String, Integer> carlos = new Entity<>("carlos", 0);
+
+        CyclicBarrier barrier = new CyclicBarrier(3);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        try {
+                            boolean done = locker.tryDoWith(bob.key, SHORT_TIMEOUT, TimeUnit.MILLISECONDS, new Runnable() {
+                                @Override
+                                public void run() {
+                                    bob.value += 10;
+                                }
+                            });
+
+                            assertThat(done, new IsEqual<>(false)); // short timeout
+                        } catch (InterruptedException e) {
+                            unreachable();
+                        }
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        try {
+                            boolean done = locker.tryDoWith(carlos.key, LONG_TIMEOUT, TimeUnit.MILLISECONDS, new Runnable() {
+                                @Override
+                                public void run() {
+                                    carlos.value += 10;
+                                }
+                            });
+
+                            assertThat(done, new IsEqual<>(true));
+                        } catch (InterruptedException e) {
+                            unreachable();
+                        }
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(carlos.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        try {
+                            locker.tryDoWith(alice.key, LONG_TIMEOUT, TimeUnit.MILLISECONDS, new Runnable() {
+                                @Override
+                                public void run() {
+                                    alice.value += 10; // executes after short timeout in first thread.
+                                }
+                            });
+                        } catch (InterruptedException e) {
+                            unreachable();
+                        }
+                    }
+                });
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+
+        assertThat(alice.value + bob.value + carlos.value, new IsEqual<>(1020));
+    }
+
+    private void unreachable() {
+        fail("unreachable");
+    }
+
+    @Test
+    public void testTryDeadlockInterrupt() throws InterruptedException {
+        Entity<String, Integer> alice = new Entity<>("alice", 500);
+        Entity<String, Integer> bob = new Entity<>("bob", 500);
+        Entity<String, Integer> carlos = new Entity<>("carlos", 0);
+
+        CyclicBarrier barrier = new CyclicBarrier(4);
+
+        Thread aliceThread = successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        try {
+                            boolean done = locker.tryDoWith(bob.key, LONG_TIMEOUT, TimeUnit.MILLISECONDS, new Runnable() {
+                                @Override
+                                public void run() {
+                                    bob.value += 10;
+                                }
+                            });
+
+                            assertThat(done, new IsEqual<>(false)); // short timeout
+                            unreachable();
+                        } catch (InterruptedException e) {
+                            // expected
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        try {
+                            boolean done = locker.tryDoWith(carlos.key, LONG_TIMEOUT, TimeUnit.MILLISECONDS, new Runnable() {
+                                @Override
+                                public void run() {
+                                    carlos.value += 10;
+                                }
+                            });
+
+                            assertThat(done, new IsEqual<>(true));
+                        } catch (InterruptedException e) {
+                            unreachable();
+                        }
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(carlos.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        locker.doWith(alice.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                alice.value += 10; // executes after short timeout in first thread.
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        successfulThreads.startAll();
+
+        await(barrier); // 1. all threads are locked on different keys
+        aliceThread.interrupt();
+
+        successfulThreads.joinAll();
+
+        assertThat(alice.value + bob.value + carlos.value, new IsEqual<>(1020));
+    }
+
     private void await(CyclicBarrier barrier) {
         try {
-            barrier.await(100, TimeUnit.MILLISECONDS);
+            barrier.await(BARRIER_TIMEOUT, TimeUnit.MILLISECONDS);
         } catch (InterruptedException | BrokenBarrierException | TimeoutException e) {
             fail(e.getMessage());
         }
@@ -402,7 +581,7 @@ public class EntityLockerTest {
 
     private void await(CyclicBarrier barrier, Class<? extends Exception> expected) {
         try {
-            barrier.await(100, TimeUnit.MILLISECONDS);
+            barrier.await(BARRIER_TIMEOUT, TimeUnit.MILLISECONDS);
             assertThat(null, new IsInstanceOf(expected));
         } catch (InterruptedException | BrokenBarrierException | TimeoutException e) {
             assertThat(e, new IsInstanceOf(expected));
@@ -424,12 +603,14 @@ public class EntityLockerTest {
         List<Class<? extends Throwable>> expectedExceptions = new ArrayList<>();
         List<Class> unhandledExceptions = Collections.synchronizedList(new ArrayList<>());
 
-        void addThread(Runnable r) {
+        Thread addThread(Runnable r) {
             Thread thread = new Thread(r);
 
             thread.setUncaughtExceptionHandler((t, e) -> unhandledExceptions.add(e.getClass()));
 
             threads.add(thread);
+
+            return thread;
         }
 
         void startAll() {
