@@ -481,6 +481,115 @@ public class EntityLockerTest {
         assertThat(alice.value + bob.value + carlos.value, new IsEqual<>(1020));
     }
 
+    enum Key {
+        Alice,
+        Bob,
+        Carlos,
+    }
+
+    @Test
+    public void testEnumSequentialForSame() throws InterruptedException {
+        EntityLocker<Key> locker = new EntityLocker<>();
+
+        Entity<Key, Integer> alice = new Entity<>(Key.Alice, 500);
+
+        CyclicBarrier barrier = new CyclicBarrier(2);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, () -> {
+                    await(barrier); // 1. thread A got Alice.
+                    alice.value += 10;
+                });
+            }
+        });
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                await(barrier); // 1. thread A got Alice.
+                locker.doWith(alice.key, () -> alice.value += 20);
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+
+        assertThat(alice.value, new IsEqual<>(530));
+    }
+
+    @Test
+    public void testEnumDeadlock() throws InterruptedException {
+        Entity<Key, Integer> alice = new Entity<>(Key.Alice, 500);
+        Entity<Key, Integer> bob = new Entity<>(Key.Bob, 500);
+        Entity<Key, Integer> carlos = new Entity<>(Key.Carlos, 0);
+
+        EntityLocker<Key> locker = new EntityLocker<>();
+
+        CyclicBarrier barrier = new CyclicBarrier(3);
+
+        successfulThreads.addExpectedException(DeadlockException.class);
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(alice.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        locker.doWith(bob.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                bob.value += 10;
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(bob.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        locker.doWith(carlos.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                carlos.value += 10;
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        successfulThreads.addThread(new Runnable() {
+            @Override
+            public void run() {
+                locker.doWith(carlos.key, new Runnable() {
+                    @Override
+                    public void run() {
+                        await(barrier); // 1. all threads are locked on different keys
+                        locker.doWith(alice.key, new Runnable() {
+                            @Override
+                            public void run() {
+                                alice.value += 10;
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        successfulThreads.startAll();
+        successfulThreads.joinAll();
+
+        assertThat(alice.value + bob.value + carlos.value, new IsEqual<>(1020));
+    }
+
     private void unreachable() {
         fail("unreachable");
     }
