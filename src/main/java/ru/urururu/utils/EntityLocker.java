@@ -9,6 +9,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
 
 /**
+ * @param <K> the type of keys
+ *
  * @author <a href="mailto:dmitriy.g.matveev@gmail.com">Dmitry Matveev</a>
  */
 public class EntityLocker<K> {
@@ -16,6 +18,20 @@ public class EntityLocker<K> {
     private final Map<K, LockInfo> locks = new HashMap<>();
     private Map<Thread, List<LockInfo>> threads = new ConcurrentHashMap<>();
 
+    /**
+     * @param key key describing protected section
+     * @param timeout the maximum time to wait for the each necessary lock
+     * @param unit the time unit of the {@code time} argument
+     * @return {@code true} if the lock was acquired and {@code false}
+     *         if the waiting time elapsed before the lock was acquired
+     * @param runnable the object whose {@code run} method is invoked if and when lock for specified key is acquired
+     *
+     * @throws InterruptedException if the current thread is interrupted
+     *         while acquiring the lock (and interruption of lock
+     *         acquisition is supported)
+     *
+     * @see Lock#tryLock()
+     */
     public boolean tryDoWith(K key, long timeout, TimeUnit unit, Runnable runnable) throws InterruptedException {
         if (!globalLock.readLock().tryLock(timeout, unit)) {
             return false;
@@ -32,7 +48,14 @@ public class EntityLocker<K> {
         }
     }
 
-    public void doWith(K key, Runnable runnable) {
+    /**
+     * @param key object describing protected section
+     * @param runnable the object whose {@code run} method is invoked when lock for specified key is acquired
+     *
+     * @throws DeadlockException if lock for requested key is held by some thread waiting for one of the locks held
+     *         (explicitly or implicitly) by the current thread
+     */
+    public void doWith(K key, Runnable runnable) throws DeadlockException {
         globalLock.readLock().lock();
         try {
             LockInfo info = get(key);
@@ -46,10 +69,26 @@ public class EntityLocker<K> {
         }
     }
 
-    public void tryDoWithGlobal(Runnable runnable, long timeout, TimeUnit unit) throws InterruptedException {
-        tryDoWithLock(runnable, globalLock.writeLock(), timeout, unit);
+    /**
+     * @param timeout the maximum time to wait for the global lock
+     * @param unit the time unit of the {@code time} argument
+     * @return {@code true} if the lock was acquired and {@code false}
+     *         if the waiting time elapsed before the lock was acquired
+     * @param runnable the object whose {@code run} method is invoked if and when lock for specified key is acquired
+     *
+     * @throws InterruptedException if the current thread is interrupted
+     *         while acquiring the lock (and interruption of lock
+     *         acquisition is supported)
+     *
+     * @see Lock#tryLock()
+     */
+    public boolean tryDoWithGlobal(Runnable runnable, long timeout, TimeUnit unit) throws InterruptedException {
+        return tryDoWithLock(runnable, globalLock.writeLock(), timeout, unit);
     }
 
+    /**
+     * @param runnable the object whose {@code run} method is invoked when global lock is acquired
+     */
     public void doWithGlobal(Runnable runnable) {
         doWithLock(runnable, globalLock.writeLock());
     }
@@ -101,7 +140,7 @@ public class EntityLocker<K> {
     }
 
     private LockInfo get(K key, boolean shouldCheckForDeadlocks) {
-        synchronized (locks) {
+        synchronized (locks) { // internal lock, so external user can use locker in his synchronized blocks.
             LockInfo result = locks.computeIfAbsent(key, new Function<K, LockInfo>() {
                 @Override
                 public LockInfo apply(K k) {
@@ -166,7 +205,7 @@ public class EntityLocker<K> {
     }
 
     private void release(LockInfo info) {
-        synchronized (locks) {
+        synchronized (locks) { // internal lock, so external user can use locker in his synchronized blocks.
             if (--info.refCount == 0) {
                 // releasing last reference
                 locks.remove(info.key);
